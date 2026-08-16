@@ -107,7 +107,40 @@ button.ghost {
 
 .topbar h1 { margin: 0; font-size: 1.25rem; }
 .topbar p { margin: 0; }
-.topbar-actions { display: flex; align-items: center; gap: 10px; }
+.topbar-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.file-picker-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+select#file-select {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 0.85rem;
+  max-width: min(420px, 55vw);
+  min-width: 180px;
+}
+
+select#file-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.ghost-link {
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-decoration: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.ghost-link:hover { color: var(--text); border-color: var(--accent); }
 
 .save-status { font-size: 0.85rem; color: var(--ok); }
 

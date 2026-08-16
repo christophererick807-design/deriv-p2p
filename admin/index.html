@@ -13,7 +13,7 @@
   <main id="login-view" class="view hidden">
     <form id="login-form" class="card" autocomplete="off">
       <h1>DERIV-APP Admin</h1>
-      <p class="muted">Enter the admin password to manage <code>public/index.html</code></p>
+      <p class="muted">Enter the admin password to manage files under <code>public/</code></p>
       <label for="password">Password</label>
       <input type="password" id="password" name="password" required autofocus>
       <p id="login-error" class="error hidden"></p>
@@ -26,9 +26,11 @@
     <header class="topbar">
       <div>
         <h1>Content editor</h1>
-        <p class="muted">Editing <code>public/index.html</code></p>
+        <p class="muted">Editing <code id="editing-label">public/</code></p>
       </div>
       <div class="topbar-actions">
+        <label class="file-picker-label" for="file-select">File</label>
+        <select id="file-select" aria-label="Select file to edit"></select>
         <span id="save-status" class="save-status"></span>
         <button id="preview-btn" class="ghost" type="button">Preview</button>
         <button id="logout-btn" class="ghost" type="button">Log out</button>
@@ -40,9 +42,10 @@
         <span id="char-count" class="muted">0 chars</span>
         <span id="last-saved" class="muted"></span>
       </div>
-      <textarea id="content" spellcheck="false" aria-label="HTML content of public/index.html"></textarea>
+      <textarea id="content" spellcheck="false" aria-label="File content"></textarea>
       <div class="editor-actions">
         <button id="save-btn" type="button">Save changes</button>
+        <a id="open-public" class="ghost-link" href="/" target="_blank" rel="noopener">Open page ↗</a>
         <span id="save-error" class="error hidden"></span>
       </div>
     </div>

@@ -9,8 +9,8 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'change-me-now';
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
 const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MB
+const ALLOWED_EXTS = new Set(['.html', '.htm', '.css', '.js', '.json', '.txt', '.svg', '.xml']);
 
-const HTML_FILE = path.join(__dirname, 'public', 'index.html');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const ADMIN_DIR = path.join(__dirname, 'admin');
 
@@ -110,6 +110,63 @@ function recordSuccess(ip) {
   loginAttempts.delete(ip);
 }
 
+/**
+ * Resolve a user-supplied relative path to an absolute file under PUBLIC_DIR.
+ * Rejects traversal, absolute paths, null bytes, and disallowed extensions.
+ * Returns { ok: true, abs, rel } or { ok: false, error, status }.
+ */
+function resolvePublicFile(relPath) {
+  if (typeof relPath !== 'string' || !relPath.trim()) {
+    return { ok: false, status: 400, error: 'file is required' };
+  }
+  // Normalize separators and strip leading slashes
+  let rel = relPath.replace(/\\/g, '/').replace(/^\/+/, '').trim();
+  if (!rel || rel.includes('\0') || rel.includes('..')) {
+    return { ok: false, status: 400, error: 'Invalid file path' };
+  }
+  const abs = path.resolve(PUBLIC_DIR, rel);
+  const publicRoot = path.resolve(PUBLIC_DIR) + path.sep;
+  if (abs !== path.resolve(PUBLIC_DIR) && !abs.startsWith(publicRoot)) {
+    return { ok: false, status: 400, error: 'Invalid file path' };
+  }
+  const ext = path.extname(abs).toLowerCase();
+  if (!ALLOWED_EXTS.has(ext)) {
+    return { ok: false, status: 400, error: `File type not allowed (${ext || 'none'})` };
+  }
+  return { ok: true, abs, rel: path.relative(PUBLIC_DIR, abs).split(path.sep).join('/') };
+}
+
+/** Recursively list editable files under PUBLIC_DIR (relative POSIX paths). */
+function listPublicFiles(dir = PUBLIC_DIR, base = '') {
+  const out = [];
+  if (!fs.existsSync(dir)) return out;
+  for (const name of fs.readdirSync(dir)) {
+    if (name.startsWith('.')) continue;
+    const full = path.join(dir, name);
+    const rel = base ? `${base}/${name}` : name;
+    let st;
+    try {
+      st = fs.statSync(full);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) {
+      out.push(...listPublicFiles(full, rel));
+    } else if (st.isFile()) {
+      const ext = path.extname(name).toLowerCase();
+      if (ALLOWED_EXTS.has(ext)) {
+        out.push({
+          path: rel,
+          size: st.size,
+          mtime: st.mtime.toISOString(),
+        });
+      }
+    }
+  }
+  out.sort((a, b) => a.path.localeCompare(b.path));
+  return out;
+}
+
 // ---------------------------------------------------------------- routes
 
 // Admin UI shell (login + editor are handled client-side)
@@ -146,35 +203,68 @@ app.post('/admin/api/logout', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// Read the live content of public/index.html
-app.get('/admin/api/content', requireAuth, (req, res) => {
-  if (!fs.existsSync(HTML_FILE)) {
-    return res.status(404).json({ error: 'public/index.html not found' });
+// List editable files under public/ (including nested folders)
+app.get('/admin/api/files', requireAuth, (req, res) => {
+  try {
+    const files = listPublicFiles();
+    res.json({ files });
+  } catch (err) {
+    console.error('Failed to list public files:', err);
+    res.status(500).json({ error: 'Failed to list files' });
   }
-  const content = fs.readFileSync(HTML_FILE, 'utf8');
-  const stat = fs.statSync(HTML_FILE);
-  res.json({ content, savedAt: stat.mtime.toISOString(), size: stat.size });
 });
 
-// Overwrite public/index.html with the submitted content
+// Read a file under public/ (?file=index.html or nested/path.html)
+app.get('/admin/api/content', requireAuth, (req, res) => {
+  const resolved = resolvePublicFile(req.query.file || 'index.html');
+  if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
+  if (!fs.existsSync(resolved.abs) || !fs.statSync(resolved.abs).isFile()) {
+    return res.status(404).json({ error: `File not found: ${resolved.rel}` });
+  }
+  try {
+    const content = fs.readFileSync(resolved.abs, 'utf8');
+    const stat = fs.statSync(resolved.abs);
+    res.json({
+      file: resolved.rel,
+      content,
+      savedAt: stat.mtime.toISOString(),
+      size: stat.size,
+    });
+  } catch (err) {
+    console.error('Failed to read file:', err);
+    res.status(500).json({ error: 'Failed to read file' });
+  }
+});
+
+// Overwrite a file under public/ (body: { file, content })
 app.post('/admin/api/content', requireAuth, (req, res) => {
   if (!sameOrigin(req)) {
     return res.status(403).json({ error: 'Cross-origin request rejected' });
   }
-  const { content } = req.body || {};
+  const { content, file } = req.body || {};
+  const resolved = resolvePublicFile(file || 'index.html');
+  if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
   if (typeof content !== 'string') {
     return res.status(400).json({ error: 'content must be a string' });
   }
   if (Buffer.byteLength(content, 'utf8') > MAX_BODY_BYTES) {
     return res.status(413).json({ error: 'Content too large (max 2 MB)' });
   }
+  // Only allow writing existing files (or create if parent dir is still under public)
+  const parent = path.dirname(resolved.abs);
+  if (!parent.startsWith(path.resolve(PUBLIC_DIR)) && parent !== path.resolve(PUBLIC_DIR)) {
+    return res.status(400).json({ error: 'Invalid file path' });
+  }
+  if (!fs.existsSync(resolved.abs)) {
+    return res.status(404).json({ error: `File not found: ${resolved.rel}. Create it on disk first.` });
+  }
   try {
-    fs.writeFileSync(HTML_FILE, content, 'utf8');
+    fs.writeFileSync(resolved.abs, content, 'utf8');
   } catch (err) {
-    console.error('Failed to write public/index.html:', err);
+    console.error('Failed to write file:', err);
     return res.status(500).json({ error: 'Failed to save. Check filesystem permissions.' });
   }
-  res.json({ ok: true, savedAt: new Date().toISOString() });
+  res.json({ ok: true, file: resolved.rel, savedAt: new Date().toISOString() });
 });
 
 // Admin assets (style.css, app.js) - mounted AFTER the API routes so they win

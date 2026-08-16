@@ -15,6 +15,12 @@ const editorPane = document.getElementById('editor-pane');
 const previewPane = document.getElementById('preview-pane');
 const previewFrame = document.getElementById('preview-frame');
 const logoutBtn = document.getElementById('logout-btn');
+const fileSelect = document.getElementById('file-select');
+const editingLabel = document.getElementById('editing-label');
+const openPublic = document.getElementById('open-public');
+
+let currentFile = 'index.html';
+let dirty = false;
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -36,6 +42,58 @@ function clearError(el) {
   el.textContent = '';
 }
 
+function setEditingMeta(file) {
+  currentFile = file;
+  editingLabel.textContent = `public/${file}`;
+  openPublic.href = '/' + file.replace(/^\/+/, '');
+  openPublic.title = `Open /${file} in a new tab`;
+  if (fileSelect.value !== file) fileSelect.value = file;
+}
+
+function updateCharCount() {
+  charCount.textContent = `${content.value.length} chars (${new Blob([content.value]).size.toLocaleString()} bytes)`;
+}
+
+function formatSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function loadFileList() {
+  const { files } = await api('/admin/api/files');
+  fileSelect.innerHTML = '';
+  if (!files.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '(no editable files in public/)';
+    fileSelect.appendChild(opt);
+    return files;
+  }
+  for (const f of files) {
+    const opt = document.createElement('option');
+    opt.value = f.path;
+    opt.textContent = `${f.path}  (${formatSize(f.size)})`;
+    fileSelect.appendChild(opt);
+  }
+  return files;
+}
+
+async function loadFile(file) {
+  clearError(saveError);
+  saveStatus.textContent = '';
+  const data = await api('/admin/api/content?file=' + encodeURIComponent(file));
+  content.value = data.content;
+  setEditingMeta(data.file);
+  dirty = false;
+  lastSaved.textContent = data.savedAt ? `Last saved: ${new Date(data.savedAt).toLocaleString()}` : '';
+  updateCharCount();
+  // Reset preview if open
+  if (!previewPane.classList.contains('hidden')) {
+    previewFrame.srcdoc = content.value;
+  }
+}
+
 async function init() {
   try {
     const { authed } = await api('/admin/api/session');
@@ -53,14 +111,12 @@ async function init() {
 async function showEditor() {
   loginView.classList.add('hidden');
   editorView.classList.remove('hidden');
-  const data = await api('/admin/api/content');
-  content.value = data.content;
-  lastSaved.textContent = data.savedAt ? `Last saved: ${new Date(data.savedAt).toLocaleString()}` : '';
-  updateCharCount();
-}
-
-function updateCharCount() {
-  charCount.textContent = `${content.value.length} chars (${new Blob([content.value]).size.toLocaleString()} bytes)`;
+  const files = await loadFileList();
+  const preferred =
+    (files.find((f) => f.path === 'index.html') && 'index.html') ||
+    (files[0] && files[0].path) ||
+    'index.html';
+  await loadFile(preferred);
 }
 
 loginForm.addEventListener('submit', async (e) => {
@@ -83,6 +139,21 @@ loginForm.addEventListener('submit', async (e) => {
   }
 });
 
+fileSelect.addEventListener('change', async () => {
+  const next = fileSelect.value;
+  if (!next || next === currentFile) return;
+  if (dirty && !confirm(`Unsaved changes in ${currentFile}. Switch file anyway?`)) {
+    fileSelect.value = currentFile;
+    return;
+  }
+  try {
+    await loadFile(next);
+  } catch (err) {
+    showError(saveError, err.message);
+    fileSelect.value = currentFile;
+  }
+});
+
 saveBtn.addEventListener('click', async () => {
   clearError(saveError);
   saveStatus.textContent = '';
@@ -91,10 +162,15 @@ saveBtn.addEventListener('click', async () => {
   try {
     const data = await api('/admin/api/content', {
       method: 'POST',
-      body: JSON.stringify({ content: content.value }),
+      body: JSON.stringify({ file: currentFile, content: content.value }),
     });
-    saveStatus.textContent = `Saved at ${new Date(data.savedAt).toLocaleTimeString()}`;
+    dirty = false;
+    saveStatus.textContent = `Saved ${data.file} at ${new Date(data.savedAt).toLocaleTimeString()}`;
     lastSaved.textContent = `Last saved: ${new Date(data.savedAt).toLocaleString()}`;
+    // Refresh sizes in the picker without losing selection
+    const keep = currentFile;
+    await loadFileList();
+    fileSelect.value = keep;
   } catch (err) {
     showError(saveError, err.message);
   } finally {
@@ -104,6 +180,7 @@ saveBtn.addEventListener('click', async () => {
 });
 
 content.addEventListener('input', () => {
+  dirty = true;
   saveStatus.textContent = 'Unsaved changes';
   updateCharCount();
 });
@@ -129,6 +206,13 @@ logoutBtn.addEventListener('click', async () => {
     /* session may already be gone; force client-side switch anyway */
   }
   location.reload();
+});
+
+window.addEventListener('beforeunload', (e) => {
+  if (dirty) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
 });
 
 init();
