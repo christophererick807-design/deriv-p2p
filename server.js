@@ -13,6 +13,50 @@ const ALLOWED_EXTS = new Set(['.html', '.htm', '.css', '.js', '.json', '.txt', '
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const ADMIN_DIR = path.join(__dirname, 'admin');
+const TRADE_CONFIG_FILE = path.join(PUBLIC_DIR, 'trade-config.json');
+
+const DEFAULT_TRADE = {
+  paymentMethod: 'Bank Transfer',
+  tradeId: 'TR-88421',
+  amount: '150.00 USD',
+  status: 'waiting',
+};
+
+function normalizeTradeStatus(status) {
+  const value = String(status || '').toLowerCase().trim();
+  if (value === 'complete' || value === 'transfer complete' || value === 'completed') {
+    return 'complete';
+  }
+  return 'waiting';
+}
+
+function readTradeConfig() {
+  try {
+    if (fs.existsSync(TRADE_CONFIG_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(TRADE_CONFIG_FILE, 'utf8'));
+      return {
+        paymentMethod: String(raw.paymentMethod || DEFAULT_TRADE.paymentMethod).slice(0, 200),
+        tradeId: String(raw.tradeId || DEFAULT_TRADE.tradeId).slice(0, 120),
+        amount: String(raw.amount || DEFAULT_TRADE.amount).slice(0, 80),
+        status: normalizeTradeStatus(raw.status),
+      };
+    }
+  } catch (err) {
+    console.error('Failed to read trade-config.json:', err.message);
+  }
+  return { ...DEFAULT_TRADE };
+}
+
+function writeTradeConfig(trade) {
+  const payload = {
+    paymentMethod: String(trade.paymentMethod || '').trim().slice(0, 200) || DEFAULT_TRADE.paymentMethod,
+    tradeId: String(trade.tradeId || '').trim().slice(0, 120) || DEFAULT_TRADE.tradeId,
+    amount: String(trade.amount || '').trim().slice(0, 80) || DEFAULT_TRADE.amount,
+    status: normalizeTradeStatus(trade.status),
+  };
+  fs.writeFileSync(TRADE_CONFIG_FILE, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+  return payload;
+}
 
 // In-memory session store: token -> expiry timestamp (server restart logs everyone out)
 const sessions = new Map();
@@ -201,6 +245,44 @@ app.post('/admin/api/logout', requireAuth, (req, res) => {
   sessions.delete(token);
   clearSessionCookie(res);
   res.json({ ok: true });
+});
+
+// Trade fields shown on public/index.html (Payment method, Trade ID, Amount, Status)
+app.get('/admin/api/trade', requireAuth, (req, res) => {
+  try {
+    const trade = readTradeConfig();
+    let savedAt = null;
+    if (fs.existsSync(TRADE_CONFIG_FILE)) {
+      savedAt = fs.statSync(TRADE_CONFIG_FILE).mtime.toISOString();
+    }
+    res.json({ trade, savedAt });
+  } catch (err) {
+    console.error('Failed to load trade config:', err);
+    res.status(500).json({ error: 'Failed to load trade settings' });
+  }
+});
+
+app.post('/admin/api/trade', requireAuth, (req, res) => {
+  if (!sameOrigin(req)) {
+    return res.status(403).json({ error: 'Cross-origin request rejected' });
+  }
+  const body = req.body || {};
+  if (!body.paymentMethod && !body.tradeId && !body.amount && !body.status) {
+    return res.status(400).json({ error: 'Provide paymentMethod, tradeId, amount, and/or status' });
+  }
+  try {
+    const current = readTradeConfig();
+    const next = writeTradeConfig({
+      paymentMethod: body.paymentMethod != null ? body.paymentMethod : current.paymentMethod,
+      tradeId: body.tradeId != null ? body.tradeId : current.tradeId,
+      amount: body.amount != null ? body.amount : current.amount,
+      status: body.status != null ? body.status : current.status,
+    });
+    res.json({ ok: true, trade: next, savedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Failed to save trade config:', err);
+    res.status(500).json({ error: 'Failed to save trade settings' });
+  }
 });
 
 // List editable files under public/ (including nested folders)

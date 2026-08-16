@@ -4,22 +4,22 @@ const loginForm = document.getElementById('login-form');
 const passwordInput = document.getElementById('password');
 const loginError = document.getElementById('login-error');
 const loginBtn = document.getElementById('login-btn');
-const content = document.getElementById('content');
+const tradeForm = document.getElementById('trade-form');
+const paymentMethod = document.getElementById('paymentMethod');
+const tradeId = document.getElementById('tradeId');
+const amount = document.getElementById('amount');
+const statusEl = document.getElementById('status');
 const saveBtn = document.getElementById('save-btn');
 const saveError = document.getElementById('save-error');
 const saveStatus = document.getElementById('save-status');
-const charCount = document.getElementById('char-count');
 const lastSaved = document.getElementById('last-saved');
-const previewBtn = document.getElementById('preview-btn');
-const editorPane = document.getElementById('editor-pane');
-const previewPane = document.getElementById('preview-pane');
-const previewFrame = document.getElementById('preview-frame');
 const logoutBtn = document.getElementById('logout-btn');
-const fileSelect = document.getElementById('file-select');
-const editingLabel = document.getElementById('editing-label');
-const openPublic = document.getElementById('open-public');
 
-let currentFile = 'index.html';
+const pvMethod = document.getElementById('pv-method');
+const pvTrade = document.getElementById('pv-trade');
+const pvAmount = document.getElementById('pv-amount');
+const pvStatus = document.getElementById('pv-status');
+
 let dirty = false;
 
 async function api(path, options = {}) {
@@ -42,56 +42,24 @@ function clearError(el) {
   el.textContent = '';
 }
 
-function setEditingMeta(file) {
-  currentFile = file;
-  editingLabel.textContent = `public/${file}`;
-  openPublic.href = '/' + file.replace(/^\/+/, '');
-  openPublic.title = `Open /${file} in a new tab`;
-  if (fileSelect.value !== file) fileSelect.value = file;
+function statusLabel(value) {
+  return value === 'complete' ? 'Transfer complete' : 'Waiting confirmation';
 }
 
-function updateCharCount() {
-  charCount.textContent = `${content.value.length} chars (${new Blob([content.value]).size.toLocaleString()} bytes)`;
-}
-
-function formatSize(n) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-async function loadFileList() {
-  const { files } = await api('/admin/api/files');
-  fileSelect.innerHTML = '';
-  if (!files.length) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = '(no editable files in public/)';
-    fileSelect.appendChild(opt);
-    return files;
-  }
-  for (const f of files) {
-    const opt = document.createElement('option');
-    opt.value = f.path;
-    opt.textContent = `${f.path}  (${formatSize(f.size)})`;
-    fileSelect.appendChild(opt);
-  }
-  return files;
-}
-
-async function loadFile(file) {
-  clearError(saveError);
-  saveStatus.textContent = '';
-  const data = await api('/admin/api/content?file=' + encodeURIComponent(file));
-  content.value = data.content;
-  setEditingMeta(data.file);
+function fillForm(trade) {
+  paymentMethod.value = trade.paymentMethod || '';
+  tradeId.value = trade.tradeId || '';
+  amount.value = trade.amount || '';
+  statusEl.value = trade.status === 'complete' ? 'complete' : 'waiting';
+  updatePreview();
   dirty = false;
-  lastSaved.textContent = data.savedAt ? `Last saved: ${new Date(data.savedAt).toLocaleString()}` : '';
-  updateCharCount();
-  // Reset preview if open
-  if (!previewPane.classList.contains('hidden')) {
-    previewFrame.srcdoc = content.value;
-  }
+}
+
+function updatePreview() {
+  pvMethod.textContent = paymentMethod.value || '—';
+  pvTrade.textContent = tradeId.value || '—';
+  pvAmount.textContent = amount.value || '—';
+  pvStatus.textContent = statusLabel(statusEl.value);
 }
 
 async function init() {
@@ -103,20 +71,20 @@ async function init() {
       loginView.classList.remove('hidden');
       passwordInput.focus();
     }
-  } catch (err) {
+  } catch {
     showError(loginError, 'Cannot reach the server.');
+    loginView.classList.remove('hidden');
   }
 }
 
 async function showEditor() {
   loginView.classList.add('hidden');
   editorView.classList.remove('hidden');
-  const files = await loadFileList();
-  const preferred =
-    (files.find((f) => f.path === 'index.html') && 'index.html') ||
-    (files[0] && files[0].path) ||
-    'index.html';
-  await loadFile(preferred);
+  const data = await api('/admin/api/trade');
+  fillForm(data.trade || {});
+  if (data.savedAt) {
+    lastSaved.textContent = `Last saved: ${new Date(data.savedAt).toLocaleString()}`;
+  }
 }
 
 loginForm.addEventListener('submit', async (e) => {
@@ -139,38 +107,26 @@ loginForm.addEventListener('submit', async (e) => {
   }
 });
 
-fileSelect.addEventListener('change', async () => {
-  const next = fileSelect.value;
-  if (!next || next === currentFile) return;
-  if (dirty && !confirm(`Unsaved changes in ${currentFile}. Switch file anyway?`)) {
-    fileSelect.value = currentFile;
-    return;
-  }
-  try {
-    await loadFile(next);
-  } catch (err) {
-    showError(saveError, err.message);
-    fileSelect.value = currentFile;
-  }
-});
-
-saveBtn.addEventListener('click', async () => {
+tradeForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
   clearError(saveError);
   saveStatus.textContent = '';
   saveBtn.disabled = true;
   saveBtn.textContent = 'Saving…';
   try {
-    const data = await api('/admin/api/content', {
+    const data = await api('/admin/api/trade', {
       method: 'POST',
-      body: JSON.stringify({ file: currentFile, content: content.value }),
+      body: JSON.stringify({
+        paymentMethod: paymentMethod.value.trim(),
+        tradeId: tradeId.value.trim(),
+        amount: amount.value.trim(),
+        status: statusEl.value,
+      }),
     });
+    fillForm(data.trade);
     dirty = false;
-    saveStatus.textContent = `Saved ${data.file} at ${new Date(data.savedAt).toLocaleTimeString()}`;
+    saveStatus.textContent = `Saved at ${new Date(data.savedAt).toLocaleTimeString()}`;
     lastSaved.textContent = `Last saved: ${new Date(data.savedAt).toLocaleString()}`;
-    // Refresh sizes in the picker without losing selection
-    const keep = currentFile;
-    await loadFileList();
-    fileSelect.value = keep;
   } catch (err) {
     showError(saveError, err.message);
   } finally {
@@ -179,31 +135,24 @@ saveBtn.addEventListener('click', async () => {
   }
 });
 
-content.addEventListener('input', () => {
-  dirty = true;
-  saveStatus.textContent = 'Unsaved changes';
-  updateCharCount();
-});
-
-previewBtn.addEventListener('click', () => {
-  const showingPreview = !previewPane.classList.contains('hidden');
-  if (showingPreview) {
-    previewPane.classList.add('hidden');
-    editorPane.classList.remove('hidden');
-    previewBtn.textContent = 'Preview';
-  } else {
-    previewFrame.srcdoc = content.value;
-    editorPane.classList.add('hidden');
-    previewPane.classList.remove('hidden');
-    previewBtn.textContent = 'Edit';
-  }
-});
+for (const el of [paymentMethod, tradeId, amount, statusEl]) {
+  el.addEventListener('input', () => {
+    dirty = true;
+    saveStatus.textContent = 'Unsaved changes';
+    updatePreview();
+  });
+  el.addEventListener('change', () => {
+    dirty = true;
+    saveStatus.textContent = 'Unsaved changes';
+    updatePreview();
+  });
+}
 
 logoutBtn.addEventListener('click', async () => {
   try {
     await api('/admin/api/logout', { method: 'POST' });
   } catch {
-    /* session may already be gone; force client-side switch anyway */
+    /* ignore */
   }
   location.reload();
 });

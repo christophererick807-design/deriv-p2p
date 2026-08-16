@@ -9,11 +9,10 @@
 </head>
 <body>
 
-  <!-- Login view -->
   <main id="login-view" class="view hidden">
     <form id="login-form" class="card" autocomplete="off">
       <h1>DERIV-APP Admin</h1>
-      <p class="muted">Enter the admin password to manage files under <code>public/</code></p>
+      <p class="muted">Enter the admin password to update trade details on the public page</p>
       <label for="password">Password</label>
       <input type="password" id="password" name="password" required autofocus>
       <p id="login-error" class="error hidden"></p>
@@ -21,38 +20,62 @@
     </form>
   </main>
 
-  <!-- Editor view -->
   <main id="editor-view" class="view hidden">
     <header class="topbar">
       <div>
-        <h1>Content editor</h1>
-        <p class="muted">Editing <code id="editing-label">public/</code></p>
+        <h1>Trade details</h1>
+        <p class="muted">These values appear on <code>public/index.html</code></p>
       </div>
       <div class="topbar-actions">
-        <label class="file-picker-label" for="file-select">File</label>
-        <select id="file-select" aria-label="Select file to edit"></select>
         <span id="save-status" class="save-status"></span>
-        <button id="preview-btn" class="ghost" type="button">Preview</button>
+        <a class="ghost-link" href="/" target="_blank" rel="noopener">Open public page ↗</a>
         <button id="logout-btn" class="ghost" type="button">Log out</button>
       </div>
     </header>
 
-    <div id="editor-pane" class="editor-pane">
-      <div class="editor-toolbar">
-        <span id="char-count" class="muted">0 chars</span>
-        <span id="last-saved" class="muted"></span>
+    <form id="trade-form" class="trade-form card-wide">
+      <div class="field">
+        <label for="paymentMethod">Payment method</label>
+        <input type="text" id="paymentMethod" name="paymentMethod" required maxlength="200"
+               placeholder="e.g. Bank Transfer, EcoCash, Skrill">
       </div>
-      <textarea id="content" spellcheck="false" aria-label="File content"></textarea>
-      <div class="editor-actions">
-        <button id="save-btn" type="button">Save changes</button>
-        <a id="open-public" class="ghost-link" href="/" target="_blank" rel="noopener">Open page ↗</a>
+
+      <div class="field">
+        <label for="tradeId">Trade ID</label>
+        <input type="text" id="tradeId" name="tradeId" required maxlength="120"
+               placeholder="e.g. TR-88421">
+      </div>
+
+      <div class="field">
+        <label for="amount">Amount</label>
+        <input type="text" id="amount" name="amount" required maxlength="80"
+               placeholder="e.g. 150.00 USD">
+      </div>
+
+      <div class="field">
+        <label for="status">Status</label>
+        <select id="status" name="status" required>
+          <option value="waiting">Waiting confirmation</option>
+          <option value="complete">Transfer complete</option>
+        </select>
+      </div>
+
+      <div class="form-actions">
+        <button type="submit" id="save-btn">Save changes</button>
+        <span id="last-saved" class="muted"></span>
         <span id="save-error" class="error hidden"></span>
       </div>
-    </div>
 
-    <div id="preview-pane" class="preview-pane hidden">
-      <iframe id="preview-frame" title="Live preview" sandbox="allow-scripts allow-same-origin"></iframe>
-    </div>
+      <div class="live-preview-box">
+        <p class="muted preview-title">Live preview on index.html</p>
+        <div class="preview-rows">
+          <div><span>Payment method</span><strong id="pv-method">—</strong></div>
+          <div><span>Trade ID</span><strong id="pv-trade">—</strong></div>
+          <div><span>Amount</span><strong id="pv-amount" class="amount-preview">—</strong></div>
+          <div><span>Status</span><strong id="pv-status">—</strong></div>
+        </div>
+      </div>
+    </form>
   </main>
 
   <script src="/admin/app.js"></script>
