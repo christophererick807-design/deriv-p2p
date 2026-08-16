@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DERIV — Trade Smarter</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0b0e14;
+      color: #e8ecf1;
+      line-height: 1.6;
+    }
+    .container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 18px 24px; border-bottom: 1px solid #1f2430;
+    }
+    .logo { font-weight: 800; font-size: 1.3rem; color: #2f81f7; }
+    nav a { color: #aab2bf; text-decoration: none; margin-left: 20px; font-size: 0.95rem; }
+    nav a:hover { color: #2f81f7; }
+    .hero { padding: 96px 0 72px; text-align: center; }
+    .hero h1 { font-size: 2.8rem; margin-bottom: 16px; }
+    .hero p { max-width: 640px; margin: 0 auto 32px; color: #aab2bf; font-size: 1.1rem; }
+    .btn {
+      display: inline-block; background: #2f81f7; color: #fff; text-decoration: none;
+      padding: 14px 32px; border-radius: 8px; font-weight: 600; font-size: 1rem;
+    }
+    .btn:hover { background: #1f6feb; }
+    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; padding: 32px 0 96px; }
+    .feature {
+      background: #141924; border: 1px solid #1f2430; border-radius: 12px; padding: 24px;
+    }
+    .feature h3 { margin-bottom: 8px; color: #2f81f7; }
+    .feature p { color: #aab2bf; font-size: 0.95rem; }
+    footer { border-top: 1px solid #1f2430; padding: 24px; text-align: center; color: #6b7280; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="logo">DERIV</span>
+    <nav>
+      <a href="#">Home</a>
+      <a href="#">Features</a>
+      <a href="#">Contact</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <h1>Trade smarter with DERIV</h1>
+      <p>Edit this headline and copy from the admin panel at <strong>/admin</strong>. Save your changes and the file <code>public/index.html</code> is updated immediately.</p>
+      <a class="btn" href="#">Get started</a>
+    </section>
+
+    <section class="features">
+      <div class="feature">
+        <h3>Real-time content editing</h3>
+        <p>Any change saved in the admin panel is written straight to public/index.html on disk.</p>
+      </div>
+      <div class="feature">
+        <h3>Password protected</h3>
+        <p>The admin panel is locked behind a password, rate-limited logins, and CSRF protection.</p>
+      </div>
+      <div class="feature">
+        <h3>Live preview</h3>
+        <p>Check how your HTML renders before publishing with the built-in preview toggle.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>© 2026 DERIV-APP. All rights reserved.</footer>
+</body>
+</html>

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>DERIV-APP Admin</title>
+  <link rel="stylesheet" href="/admin/style.css">
+</head>
+<body>
+
+  <!-- Login view -->
+  <main id="login-view" class="view hidden">
+    <form id="login-form" class="card" autocomplete="off">
+      <h1>DERIV-APP Admin</h1>
+      <p class="muted">Enter the admin password to manage <code>public/index.html</code></p>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required autofocus>
+      <p id="login-error" class="error hidden"></p>
+      <button type="submit" id="login-btn">Sign in</button>
+    </form>
+  </main>
+
+  <!-- Editor view -->
+  <main id="editor-view" class="view hidden">
+    <header class="topbar">
+      <div>
+        <h1>Content editor</h1>
+        <p class="muted">Editing <code>public/index.html</code></p>
+      </div>
+      <div class="topbar-actions">
+        <span id="save-status" class="save-status"></span>
+        <button id="preview-btn" class="ghost" type="button">Preview</button>
+        <button id="logout-btn" class="ghost" type="button">Log out</button>
+      </div>
+    </header>
+
+    <div id="editor-pane" class="editor-pane">
+      <div class="editor-toolbar">
+        <span id="char-count" class="muted">0 chars</span>
+        <span id="last-saved" class="muted"></span>
+      </div>
+      <textarea id="content" spellcheck="false" aria-label="HTML content of public/index.html"></textarea>
+      <div class="editor-actions">
+        <button id="save-btn" type="button">Save changes</button>
+        <span id="save-error" class="error hidden"></span>
+      </div>
+    </div>
+
+    <div id="preview-pane" class="preview-pane hidden">
+      <iframe id="preview-frame" title="Live preview" sandbox="allow-scripts allow-same-origin"></iframe>
+    </div>
+  </main>
+
+  <script src="/admin/app.js"></script>
+</body>
+</html>
