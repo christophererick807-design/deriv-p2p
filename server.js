@@ -6,7 +6,8 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'change-me-now';
+// Prefer ADMIN_PASSWORD from .env / host env. Fallback matches the password you set.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Joan5078';
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
 const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MB
 const ALLOWED_EXTS = new Set(['.html', '.htm', '.css', '.js', '.json', '.txt', '.svg', '.xml']);
@@ -54,8 +55,23 @@ function writeTradeConfig(trade) {
     amount: String(trade.amount || '').trim().slice(0, 80) || DEFAULT_TRADE.amount,
     status: normalizeTradeStatus(trade.status),
   };
+  // Ensure public/ exists and is writable on the host
+  if (!fs.existsSync(PUBLIC_DIR)) {
+    fs.mkdirSync(PUBLIC_DIR, { recursive: true });
+  }
   fs.writeFileSync(TRADE_CONFIG_FILE, JSON.stringify(payload, null, 2) + '\n', 'utf8');
   return payload;
+}
+
+/** Ensure trade-config.json exists so first admin load never 500s */
+function ensureTradeConfigFile() {
+  try {
+    if (!fs.existsSync(TRADE_CONFIG_FILE)) {
+      writeTradeConfig(DEFAULT_TRADE);
+    }
+  } catch (err) {
+    console.error('Could not create trade-config.json:', err.message);
+  }
 }
 
 // In-memory session store: token -> expiry timestamp (server restart logs everyone out)
@@ -65,6 +81,8 @@ const loginAttempts = new Map();
 
 const app = express();
 app.disable('x-powered-by');
+// Needed so Secure cookies and req.ip work behind Railway/Render/nginx HTTPS proxies
+app.set('trust proxy', 1);
 // CSP is intentionally left off: the whole point of the admin panel is to edit
 // raw HTML (which may contain inline scripts/styles). SameSite=Strict cookie +
 // Origin checks cover the CSRF angle instead.
@@ -120,15 +138,21 @@ function requireAuth(req, res, next) {
   next();
 }
 
+function cookieFlags() {
+  // Secure cookies on HTTPS (required on many hosts); omit on plain HTTP localhost
+  const secure = process.env.FORCE_SECURE_COOKIE === '1' || process.env.NODE_ENV === 'production';
+  return `HttpOnly; SameSite=Lax; Path=/${secure ? '; Secure' : ''}`;
+}
+
 function setSessionCookie(res, token) {
   res.setHeader(
     'Set-Cookie',
-    `admin_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`
+    `admin_session=${encodeURIComponent(token)}; ${cookieFlags()}; Max-Age=${SESSION_TTL_MS / 1000}`
   );
 }
 
 function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', 'admin_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+  res.setHeader('Set-Cookie', `admin_session=; ${cookieFlags()}; Max-Age=0`);
 }
 
 function checkRateLimit(ip) {
@@ -250,15 +274,21 @@ app.post('/admin/api/logout', requireAuth, (req, res) => {
 // Trade fields shown on public/index.html (Payment method, Trade ID, Amount, Status)
 app.get('/admin/api/trade', requireAuth, (req, res) => {
   try {
+    ensureTradeConfigFile();
     const trade = readTradeConfig();
     let savedAt = null;
-    if (fs.existsSync(TRADE_CONFIG_FILE)) {
-      savedAt = fs.statSync(TRADE_CONFIG_FILE).mtime.toISOString();
+    try {
+      if (fs.existsSync(TRADE_CONFIG_FILE)) {
+        savedAt = fs.statSync(TRADE_CONFIG_FILE).mtime.toISOString();
+      }
+    } catch {
+      /* ignore stat errors */
     }
     res.json({ trade, savedAt });
   } catch (err) {
     console.error('Failed to load trade config:', err);
-    res.status(500).json({ error: 'Failed to load trade settings' });
+    // Never hard-fail the admin UI — return defaults
+    res.json({ trade: { ...DEFAULT_TRADE }, savedAt: null, warning: 'Using defaults (could not read config file)' });
   }
 });
 
@@ -369,7 +399,8 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`DERIV-APP running on http://localhost:${PORT}`);
   console.log(`Admin panel:   http://localhost:${PORT}/admin`);
+  ensureTradeConfigFile();
   console.log(
-    `Admin password: ${process.env.ADMIN_PASSWORD ? '(from env/.env)' : 'DEFAULT "change-me-now" - set ADMIN_PASSWORD!'}`
+    `Admin password: ${process.env.ADMIN_PASSWORD ? '(from env/.env)' : 'DEFAULT Joan5078 (set ADMIN_PASSWORD in .env to change)'}`
   );
 });
