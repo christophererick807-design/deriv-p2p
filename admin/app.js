@@ -132,8 +132,12 @@ tradeForm.addEventListener('submit', async (e) => {
     });
     fillForm(data.trade);
     dirty = false;
-    saveStatus.textContent = `Saved at ${new Date(data.savedAt).toLocaleTimeString()}`;
+    const via = data.savedVia ? ` via ${data.savedVia}` : '';
+    saveStatus.textContent = `Saved at ${new Date(data.savedAt).toLocaleTimeString()}${via}`;
     lastSaved.textContent = `Last saved: ${new Date(data.savedAt).toLocaleString()}`;
+    if (data.savedVia === 'github' || (data.savedVia || '').includes('github')) {
+      saveStatus.textContent += ' (live on site immediately; GitHub sync may redeploy)';
+    }
   } catch (err) {
     showError(saveError, err.message);
   } finally {

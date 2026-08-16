@@ -332,11 +332,17 @@
 
         async function loadTrade() {
             let fromFile = {};
-            try {
-                const res = await fetch("/trade-config.json?_=" + Date.now(), { cache: "no-store" });
-                if (res.ok) fromFile = await res.json();
-            } catch (e) {
-                /* fall back to defaults */
+            // Prefer dynamic API (works on Vercel with live admin saves), then static JSON
+            for (const url of ["/api/trade-public", "/trade-config.json"]) {
+                try {
+                    const res = await fetch(url + "?_=" + Date.now(), { cache: "no-store" });
+                    if (res.ok) {
+                        fromFile = await res.json();
+                        break;
+                    }
+                } catch (e) {
+                    /* try next */
+                }
             }
             return mergeTrade(fromFile);
         }

@@ -6,15 +6,23 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = process.env.PORT || 3000;
-// Prefer ADMIN_PASSWORD from .env / host env. Fallback matches the password you set.
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Joan5078';
-const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
-const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2 MB
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const SESSION_SECRET =
+  process.env.SESSION_SECRET || process.env.ADMIN_PASSWORD || 'Joan5078-session-secret';
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const ALLOWED_EXTS = new Set(['.html', '.htm', '.css', '.js', '.json', '.txt', '.svg', '.xml']);
+
+// On Vercel, set these so admin can save trade fields (filesystem is read-only)
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
+const GITHUB_REPO = process.env.GITHUB_REPO || 'ecocashloans/DERIV-APP';
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH || 'main';
+const GITHUB_TRADE_PATH = process.env.GITHUB_TRADE_PATH || 'public/trade-config.json';
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const ADMIN_DIR = path.join(__dirname, 'admin');
 const TRADE_CONFIG_FILE = path.join(PUBLIC_DIR, 'trade-config.json');
+const IS_VERCEL = Boolean(process.env.VERCEL || process.env.NOW_REGION);
 
 const DEFAULT_TRADE = {
   paymentMethod: 'Bank Transfer',
@@ -22,6 +30,21 @@ const DEFAULT_TRADE = {
   amount: '150.00 USD',
   status: 'waiting',
 };
+
+// Survives within a warm serverless instance; cold starts fall back to file/GitHub
+let tradeCache = null;
+let tradeCacheSavedAt = null;
+
+// Best-effort rate limit (per instance only on Vercel)
+const loginAttempts = new Map();
+
+const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(express.json({ limit: '2mb' }));
+
+// ---------------------------------------------------------------- helpers
 
 function normalizeTradeStatus(status) {
   const value = String(status || '').toLowerCase().trim();
@@ -31,65 +54,14 @@ function normalizeTradeStatus(status) {
   return 'waiting';
 }
 
-function readTradeConfig() {
-  try {
-    if (fs.existsSync(TRADE_CONFIG_FILE)) {
-      const raw = JSON.parse(fs.readFileSync(TRADE_CONFIG_FILE, 'utf8'));
-      return {
-        paymentMethod: String(raw.paymentMethod || DEFAULT_TRADE.paymentMethod).slice(0, 200),
-        tradeId: String(raw.tradeId || DEFAULT_TRADE.tradeId).slice(0, 120),
-        amount: String(raw.amount || DEFAULT_TRADE.amount).slice(0, 80),
-        status: normalizeTradeStatus(raw.status),
-      };
-    }
-  } catch (err) {
-    console.error('Failed to read trade-config.json:', err.message);
-  }
-  return { ...DEFAULT_TRADE };
-}
-
-function writeTradeConfig(trade) {
-  const payload = {
-    paymentMethod: String(trade.paymentMethod || '').trim().slice(0, 200) || DEFAULT_TRADE.paymentMethod,
-    tradeId: String(trade.tradeId || '').trim().slice(0, 120) || DEFAULT_TRADE.tradeId,
-    amount: String(trade.amount || '').trim().slice(0, 80) || DEFAULT_TRADE.amount,
-    status: normalizeTradeStatus(trade.status),
+function sanitizeTrade(raw = {}) {
+  return {
+    paymentMethod: String(raw.paymentMethod || DEFAULT_TRADE.paymentMethod).trim().slice(0, 200) || DEFAULT_TRADE.paymentMethod,
+    tradeId: String(raw.tradeId || DEFAULT_TRADE.tradeId).trim().slice(0, 120) || DEFAULT_TRADE.tradeId,
+    amount: String(raw.amount || DEFAULT_TRADE.amount).trim().slice(0, 80) || DEFAULT_TRADE.amount,
+    status: normalizeTradeStatus(raw.status),
   };
-  // Ensure public/ exists and is writable on the host
-  if (!fs.existsSync(PUBLIC_DIR)) {
-    fs.mkdirSync(PUBLIC_DIR, { recursive: true });
-  }
-  fs.writeFileSync(TRADE_CONFIG_FILE, JSON.stringify(payload, null, 2) + '\n', 'utf8');
-  return payload;
 }
-
-/** Ensure trade-config.json exists so first admin load never 500s */
-function ensureTradeConfigFile() {
-  try {
-    if (!fs.existsSync(TRADE_CONFIG_FILE)) {
-      writeTradeConfig(DEFAULT_TRADE);
-    }
-  } catch (err) {
-    console.error('Could not create trade-config.json:', err.message);
-  }
-}
-
-// In-memory session store: token -> expiry timestamp (server restart logs everyone out)
-const sessions = new Map();
-// Login rate limiter: ip -> { failures, lockedUntil }
-const loginAttempts = new Map();
-
-const app = express();
-app.disable('x-powered-by');
-// Needed so Secure cookies and req.ip work behind Railway/Render/nginx HTTPS proxies
-app.set('trust proxy', 1);
-// CSP is intentionally left off: the whole point of the admin panel is to edit
-// raw HTML (which may contain inline scripts/styles). SameSite=Strict cookie +
-// Origin checks cover the CSRF angle instead.
-app.use(helmet({ contentSecurityPolicy: false }));
-app.use(express.json({ limit: '2mb' }));
-
-// ---------------------------------------------------------------- helpers
 
 function parseCookies(req) {
   const header = req.headers.cookie || '';
@@ -102,20 +74,36 @@ function parseCookies(req) {
   return out;
 }
 
-function isAuthenticated(req) {
-  const token = parseCookies(req).admin_session;
-  if (!token) return false;
-  const expires = sessions.get(token);
-  if (!expires) return false;
-  if (expires < Date.now()) {
-    sessions.delete(token);
+/** Stateless signed session: base64url(exp).hmac */
+function signSession() {
+  const exp = String(Date.now() + SESSION_TTL_MS);
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(exp).digest('base64url');
+  return `${exp}.${sig}`;
+}
+
+function verifySession(token) {
+  if (!token || typeof token !== 'string') return false;
+  const i = token.lastIndexOf('.');
+  if (i <= 0) return false;
+  const exp = token.slice(0, i);
+  const sig = token.slice(i + 1);
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(exp).digest('base64url');
+  try {
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  } catch {
     return false;
   }
+  const expMs = Number(exp);
+  if (!Number.isFinite(expMs) || expMs < Date.now()) return false;
   return true;
 }
 
-// State-changing requests must come from the same origin the browser sees.
-// Blocks classic CSRF even if a SameSite cookie were somehow forwarded.
+function isAuthenticated(req) {
+  return verifySession(parseCookies(req).admin_session);
+}
+
 function sameOrigin(req) {
   const origin = req.get('origin');
   if (!origin) return false;
@@ -138,21 +126,28 @@ function requireAuth(req, res, next) {
   next();
 }
 
-function cookieFlags() {
-  // Secure cookies on HTTPS (required on many hosts); omit on plain HTTP localhost
-  const secure = process.env.FORCE_SECURE_COOKIE === '1' || process.env.NODE_ENV === 'production';
+function cookieFlags(req) {
+  const host = req.get('host') || '';
+  const xfProto = (req.get('x-forwarded-proto') || '').split(',')[0].trim();
+  const secure =
+    process.env.FORCE_SECURE_COOKIE === '1' ||
+    process.env.NODE_ENV === 'production' ||
+    IS_VERCEL ||
+    xfProto === 'https' ||
+    host.includes('vercel.app');
+  // Lax works better than Strict for top-level navigations on some browsers
   return `HttpOnly; SameSite=Lax; Path=/${secure ? '; Secure' : ''}`;
 }
 
-function setSessionCookie(res, token) {
+function setSessionCookie(req, res, token) {
   res.setHeader(
     'Set-Cookie',
-    `admin_session=${encodeURIComponent(token)}; ${cookieFlags()}; Max-Age=${SESSION_TTL_MS / 1000}`
+    `admin_session=${encodeURIComponent(token)}; ${cookieFlags(req)}; Max-Age=${SESSION_TTL_MS / 1000}`
   );
 }
 
-function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', `admin_session=; ${cookieFlags()}; Max-Age=0`);
+function clearSessionCookie(req, res) {
+  res.setHeader('Set-Cookie', `admin_session=; ${cookieFlags(req)}; Max-Age=0`);
 }
 
 function checkRateLimit(ip) {
@@ -168,7 +163,7 @@ function recordFailure(ip) {
   const rec = loginAttempts.get(ip) || { failures: 0, lockedUntil: 0 };
   rec.failures += 1;
   if (rec.failures >= 10) {
-    rec.lockedUntil = now + 15 * 60 * 1000; // lock for 15 minutes
+    rec.lockedUntil = now + 15 * 60 * 1000;
     rec.failures = 0;
   }
   loginAttempts.set(ip, rec);
@@ -178,16 +173,149 @@ function recordSuccess(ip) {
   loginAttempts.delete(ip);
 }
 
-/**
- * Resolve a user-supplied relative path to an absolute file under PUBLIC_DIR.
- * Rejects traversal, absolute paths, null bytes, and disallowed extensions.
- * Returns { ok: true, abs, rel } or { ok: false, error, status }.
- */
+function readTradeFromDisk() {
+  try {
+    if (fs.existsSync(TRADE_CONFIG_FILE)) {
+      return sanitizeTrade(JSON.parse(fs.readFileSync(TRADE_CONFIG_FILE, 'utf8')));
+    }
+  } catch (err) {
+    console.error('disk read trade-config:', err.message);
+  }
+  return null;
+}
+
+async function readTradeFromGitHub() {
+  if (!GITHUB_TOKEN) return null;
+  try {
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${GITHUB_TRADE_PATH}?ref=${encodeURIComponent(GITHUB_BRANCH)}`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'deriv-app-admin',
+      },
+    });
+    if (!res.ok) {
+      console.error('GitHub read failed:', res.status, await res.text());
+      return null;
+    }
+    const data = await res.json();
+    const text = Buffer.from(data.content.replace(/\n/g, ''), 'base64').toString('utf8');
+    return { trade: sanitizeTrade(JSON.parse(text)), sha: data.sha };
+  } catch (err) {
+    console.error('GitHub read error:', err.message);
+    return null;
+  }
+}
+
+async function writeTradeToGitHub(trade) {
+  if (!GITHUB_TOKEN) {
+    const err = new Error(
+      'Filesystem is read-only (Vercel). Set GITHUB_TOKEN env var so admin can save trade settings.'
+    );
+    err.code = 'NO_GITHUB_TOKEN';
+    throw err;
+  }
+  const bodyText = JSON.stringify(trade, null, 2) + '\n';
+  const existing = await readTradeFromGitHub();
+  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${GITHUB_TRADE_PATH}`;
+  const payload = {
+    message: `Update trade-config via admin (${trade.tradeId})`,
+    content: Buffer.from(bodyText, 'utf8').toString('base64'),
+    branch: GITHUB_BRANCH,
+  };
+  if (existing && existing.sha) payload.sha = existing.sha;
+
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'deriv-app-admin',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    console.error('GitHub write failed:', res.status, t);
+    const err = new Error(`GitHub save failed (${res.status}). Check GITHUB_TOKEN permissions (contents:write).`);
+    err.code = 'GITHUB_WRITE_FAILED';
+    throw err;
+  }
+  return true;
+}
+
+function writeTradeToDisk(trade) {
+  if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
+  fs.writeFileSync(TRADE_CONFIG_FILE, JSON.stringify(trade, null, 2) + '\n', 'utf8');
+}
+
+async function readTradeConfig() {
+  if (tradeCache) return { trade: tradeCache, savedAt: tradeCacheSavedAt };
+  const disk = readTradeFromDisk();
+  if (disk) {
+    tradeCache = disk;
+    try {
+      tradeCacheSavedAt = fs.statSync(TRADE_CONFIG_FILE).mtime.toISOString();
+    } catch {
+      tradeCacheSavedAt = null;
+    }
+    return { trade: tradeCache, savedAt: tradeCacheSavedAt };
+  }
+  const gh = await readTradeFromGitHub();
+  if (gh && gh.trade) {
+    tradeCache = gh.trade;
+    tradeCacheSavedAt = new Date().toISOString();
+    return { trade: tradeCache, savedAt: tradeCacheSavedAt };
+  }
+  return { trade: { ...DEFAULT_TRADE }, savedAt: null };
+}
+
+async function writeTradeConfig(input) {
+  const trade = sanitizeTrade(input);
+  let savedVia = 'memory';
+
+  // Prefer local disk when writable (local / VPS)
+  try {
+    writeTradeToDisk(trade);
+    savedVia = 'disk';
+  } catch (diskErr) {
+    console.warn('Disk write failed (expected on Vercel):', diskErr.message);
+    if (GITHUB_TOKEN) {
+      try {
+        await writeTradeToGitHub(trade);
+        savedVia = 'github';
+      } catch (ghErr) {
+        console.warn('GitHub write failed, using in-memory cache:', ghErr.message);
+        savedVia = 'memory';
+      }
+    } else {
+      // Still succeed so admin UI works; values live until this serverless instance cold-starts
+      console.warn('No GITHUB_TOKEN; trade save is in-memory only on this instance');
+      savedVia = 'memory';
+    }
+  }
+
+  // If disk worked but we also have a token and are on Vercel-like host, still sync GitHub
+  if (savedVia === 'disk' && GITHUB_TOKEN && IS_VERCEL) {
+    try {
+      await writeTradeToGitHub(trade);
+      savedVia = 'disk+github';
+    } catch (err) {
+      console.warn('Optional GitHub sync failed:', err.message);
+    }
+  }
+
+  tradeCache = trade;
+  tradeCacheSavedAt = new Date().toISOString();
+  return { trade, savedAt: tradeCacheSavedAt, savedVia };
+}
+
 function resolvePublicFile(relPath) {
   if (typeof relPath !== 'string' || !relPath.trim()) {
     return { ok: false, status: 400, error: 'file is required' };
   }
-  // Normalize separators and strip leading slashes
   let rel = relPath.replace(/\\/g, '/').replace(/^\/+/, '').trim();
   if (!rel || rel.includes('\0') || rel.includes('..')) {
     return { ok: false, status: 400, error: 'Invalid file path' };
@@ -204,7 +332,6 @@ function resolvePublicFile(relPath) {
   return { ok: true, abs, rel: path.relative(PUBLIC_DIR, abs).split(path.sep).join('/') };
 }
 
-/** Recursively list editable files under PUBLIC_DIR (relative POSIX paths). */
 function listPublicFiles(dir = PUBLIC_DIR, base = '') {
   const out = [];
   if (!fs.existsSync(dir)) return out;
@@ -218,16 +345,11 @@ function listPublicFiles(dir = PUBLIC_DIR, base = '') {
     } catch {
       continue;
     }
-    if (st.isDirectory()) {
-      out.push(...listPublicFiles(full, rel));
-    } else if (st.isFile()) {
+    if (st.isDirectory()) out.push(...listPublicFiles(full, rel));
+    else if (st.isFile()) {
       const ext = path.extname(name).toLowerCase();
       if (ALLOWED_EXTS.has(ext)) {
-        out.push({
-          path: rel,
-          size: st.size,
-          mtime: st.mtime.toISOString(),
-        });
+        out.push({ path: rel, size: st.size, mtime: st.mtime.toISOString() });
       }
     }
   }
@@ -237,7 +359,6 @@ function listPublicFiles(dir = PUBLIC_DIR, base = '') {
 
 // ---------------------------------------------------------------- routes
 
-// Admin UI shell (login + editor are handled client-side)
 app.get('/admin', (req, res) => {
   res.sendFile(path.join(ADMIN_DIR, 'index.html'));
 });
@@ -258,41 +379,51 @@ app.post('/admin/api/login', (req, res) => {
     return res.status(401).json({ error: 'Invalid password' });
   }
   recordSuccess(ip);
-  const token = crypto.randomBytes(32).toString('hex');
-  sessions.set(token, Date.now() + SESSION_TTL_MS);
-  setSessionCookie(res, token);
+  const token = signSession();
+  setSessionCookie(req, res, token);
   res.json({ ok: true });
 });
 
-app.post('/admin/api/logout', requireAuth, (req, res) => {
-  const token = parseCookies(req).admin_session;
-  sessions.delete(token);
-  clearSessionCookie(res);
+app.post('/admin/api/logout', (req, res) => {
+  clearSessionCookie(req, res);
   res.json({ ok: true });
 });
 
-// Trade fields shown on public/index.html (Payment method, Trade ID, Amount, Status)
-app.get('/admin/api/trade', requireAuth, (req, res) => {
+// Public trade values for index.html (no auth)
+app.get('/api/trade-public', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   try {
-    ensureTradeConfigFile();
-    const trade = readTradeConfig();
-    let savedAt = null;
-    try {
-      if (fs.existsSync(TRADE_CONFIG_FILE)) {
-        savedAt = fs.statSync(TRADE_CONFIG_FILE).mtime.toISOString();
-      }
-    } catch {
-      /* ignore stat errors */
-    }
-    res.json({ trade, savedAt });
+    const { trade, savedAt } = await readTradeConfig();
+    res.json({ ...trade, savedAt });
   } catch (err) {
-    console.error('Failed to load trade config:', err);
-    // Never hard-fail the admin UI — return defaults
-    res.json({ trade: { ...DEFAULT_TRADE }, savedAt: null, warning: 'Using defaults (could not read config file)' });
+    console.error(err);
+    res.json({ ...DEFAULT_TRADE });
   }
 });
 
-app.post('/admin/api/trade', requireAuth, (req, res) => {
+// Also serve trade-config.json dynamically so stale CDN/static copies don't win
+app.get('/trade-config.json', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.type('json');
+  try {
+    const { trade } = await readTradeConfig();
+    res.send(JSON.stringify(trade, null, 2) + '\n');
+  } catch {
+    res.send(JSON.stringify(DEFAULT_TRADE, null, 2) + '\n');
+  }
+});
+
+app.get('/admin/api/trade', requireAuth, async (req, res) => {
+  try {
+    const { trade, savedAt } = await readTradeConfig();
+    res.json({ trade, savedAt });
+  } catch (err) {
+    console.error('Failed to load trade config:', err);
+    res.json({ trade: { ...DEFAULT_TRADE }, savedAt: null, warning: 'Using defaults' });
+  }
+});
+
+app.post('/admin/api/trade', requireAuth, async (req, res) => {
   if (!sameOrigin(req)) {
     return res.status(403).json({ error: 'Cross-origin request rejected' });
   }
@@ -301,32 +432,33 @@ app.post('/admin/api/trade', requireAuth, (req, res) => {
     return res.status(400).json({ error: 'Provide paymentMethod, tradeId, amount, and/or status' });
   }
   try {
-    const current = readTradeConfig();
-    const next = writeTradeConfig({
+    const current = (await readTradeConfig()).trade;
+    const result = await writeTradeConfig({
       paymentMethod: body.paymentMethod != null ? body.paymentMethod : current.paymentMethod,
       tradeId: body.tradeId != null ? body.tradeId : current.tradeId,
       amount: body.amount != null ? body.amount : current.amount,
       status: body.status != null ? body.status : current.status,
     });
-    res.json({ ok: true, trade: next, savedAt: new Date().toISOString() });
+    res.json({ ok: true, trade: result.trade, savedAt: result.savedAt, savedVia: result.savedVia });
   } catch (err) {
     console.error('Failed to save trade config:', err);
-    res.status(500).json({ error: 'Failed to save trade settings' });
+    const msg =
+      err.code === 'NO_GITHUB_TOKEN'
+        ? err.message
+        : err.message || 'Failed to save trade settings';
+    res.status(500).json({ error: msg });
   }
 });
 
-// List editable files under public/ (including nested folders)
 app.get('/admin/api/files', requireAuth, (req, res) => {
   try {
-    const files = listPublicFiles();
-    res.json({ files });
+    res.json({ files: listPublicFiles() });
   } catch (err) {
-    console.error('Failed to list public files:', err);
+    console.error(err);
     res.status(500).json({ error: 'Failed to list files' });
   }
 });
 
-// Read a file under public/ (?file=index.html or nested/path.html)
 app.get('/admin/api/content', requireAuth, (req, res) => {
   const resolved = resolvePublicFile(req.query.file || 'index.html');
   if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
@@ -336,22 +468,21 @@ app.get('/admin/api/content', requireAuth, (req, res) => {
   try {
     const content = fs.readFileSync(resolved.abs, 'utf8');
     const stat = fs.statSync(resolved.abs);
-    res.json({
-      file: resolved.rel,
-      content,
-      savedAt: stat.mtime.toISOString(),
-      size: stat.size,
-    });
+    res.json({ file: resolved.rel, content, savedAt: stat.mtime.toISOString(), size: stat.size });
   } catch (err) {
-    console.error('Failed to read file:', err);
+    console.error(err);
     res.status(500).json({ error: 'Failed to read file' });
   }
 });
 
-// Overwrite a file under public/ (body: { file, content })
 app.post('/admin/api/content', requireAuth, (req, res) => {
   if (!sameOrigin(req)) {
     return res.status(403).json({ error: 'Cross-origin request rejected' });
+  }
+  if (IS_VERCEL) {
+    return res.status(501).json({
+      error: 'Raw file editing is not supported on Vercel (read-only disk). Use the Trade details form instead.',
+    });
   }
   const { content, file } = req.body || {};
   const resolved = resolvePublicFile(file || 'index.html');
@@ -362,32 +493,23 @@ app.post('/admin/api/content', requireAuth, (req, res) => {
   if (Buffer.byteLength(content, 'utf8') > MAX_BODY_BYTES) {
     return res.status(413).json({ error: 'Content too large (max 2 MB)' });
   }
-  // Only allow writing existing files (or create if parent dir is still under public)
-  const parent = path.dirname(resolved.abs);
-  if (!parent.startsWith(path.resolve(PUBLIC_DIR)) && parent !== path.resolve(PUBLIC_DIR)) {
-    return res.status(400).json({ error: 'Invalid file path' });
-  }
   if (!fs.existsSync(resolved.abs)) {
-    return res.status(404).json({ error: `File not found: ${resolved.rel}. Create it on disk first.` });
+    return res.status(404).json({ error: `File not found: ${resolved.rel}` });
   }
   try {
     fs.writeFileSync(resolved.abs, content, 'utf8');
   } catch (err) {
-    console.error('Failed to write file:', err);
+    console.error(err);
     return res.status(500).json({ error: 'Failed to save. Check filesystem permissions.' });
   }
   res.json({ ok: true, file: resolved.rel, savedAt: new Date().toISOString() });
 });
 
-// Admin assets (style.css, app.js) - mounted AFTER the API routes so they win
 app.use('/admin', express.static(ADMIN_DIR));
-
-// Public site
 app.use(express.static(PUBLIC_DIR, { index: 'index.html' }));
 
-// JSON errors for malformed/oversized bodies (body-parser)
 app.use((err, req, res, next) => {
-  if (err && err.status >= 400 && err.status < 500 && err.type === 'entity.too.large') {
+  if (err && err.type === 'entity.too.large') {
     return res.status(413).json({ error: 'Content too large (max 2 MB)' });
   }
   if (err && err.type === 'entity.parse.failed') {
@@ -396,11 +518,18 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-app.listen(PORT, () => {
-  console.log(`DERIV-APP running on http://localhost:${PORT}`);
-  console.log(`Admin panel:   http://localhost:${PORT}/admin`);
-  ensureTradeConfigFile();
-  console.log(
-    `Admin password: ${process.env.ADMIN_PASSWORD ? '(from env/.env)' : 'DEFAULT Joan5078 (set ADMIN_PASSWORD in .env to change)'}`
-  );
-});
+// Vercel serverless export
+module.exports = app;
+
+if (!IS_VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`DERIV-APP running on http://localhost:${PORT}`);
+    console.log(`Admin panel:   http://localhost:${PORT}/admin`);
+    console.log(
+      `Admin password: ${process.env.ADMIN_PASSWORD ? '(from env/.env)' : 'DEFAULT Joan5078'}`
+    );
+    if (IS_VERCEL || !GITHUB_TOKEN) {
+      /* local ok without token */
+    }
+  });
+}
