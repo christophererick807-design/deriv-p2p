@@ -22,6 +22,23 @@ const pvStatus = document.getElementById('pv-status');
 
 let dirty = false;
 
+const BACKUP_KEY = 'admin_trade_backup';
+
+function saveBackup(trade, savedAt) {
+  try {
+    localStorage.setItem(BACKUP_KEY, JSON.stringify({ trade, savedAt }));
+  } catch { /* storage unavailable; ignore */ }
+}
+
+function getBackup() {
+  try {
+    const raw = localStorage.getItem(BACKUP_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     credentials: 'same-origin',
@@ -69,6 +86,42 @@ function updatePreview() {
   pvStatus.textContent = statusLabel(statusEl.value);
 }
 
+async function restoreIfNeeded(serverData) {
+  const backup = getBackup();
+  if (!backup || !backup.trade || !backup.savedAt) return null;
+
+  const serverSavedAt = serverData.savedAt ? Date.parse(serverData.savedAt) : 0;
+  const backupSavedAt = Date.parse(backup.savedAt);
+  if (!backupSavedAt || backupSavedAt <= serverSavedAt) return null;
+
+  const srv = serverData.trade || {};
+  if (
+    backup.trade.paymentMethod === srv.paymentMethod &&
+    backup.trade.tradeId === srv.tradeId &&
+    backup.trade.amount === srv.amount &&
+    (backup.trade.status || 'waiting') === (srv.status || 'waiting')
+  ) {
+    return null;
+  }
+
+  try {
+    const data = await api('/admin/api/trade', {
+      method: 'POST',
+      body: JSON.stringify({
+        paymentMethod: (backup.trade.paymentMethod || '').trim(),
+        tradeId: (backup.trade.tradeId || '').trim(),
+        amount: (backup.trade.amount || '').trim(),
+        status: backup.trade.status === 'complete' ? 'complete' : 'waiting',
+      }),
+    });
+    saveBackup(data.trade, data.savedAt);
+    return `Restored last saved version (saved ${new Date(data.savedAt).toLocaleString()})`;
+  } catch (err) {
+    showError(saveError, `Could not restore last saved version: ${err.message}`);
+    return null;
+  }
+}
+
 async function init() {
   try {
     const { authed } = await api('/admin/api/session');
@@ -87,10 +140,17 @@ async function init() {
 async function showEditor() {
   loginView.classList.add('hidden');
   editorView.classList.remove('hidden');
-  const data = await api('/admin/api/trade');
+  let data = await api('/admin/api/trade');
+  const restoredMsg = await restoreIfNeeded(data);
+  if (restoredMsg) {
+    data = await api('/admin/api/trade');
+  }
   fillForm(data.trade || {});
   if (data.savedAt) {
     lastSaved.textContent = `Last saved: ${new Date(data.savedAt).toLocaleString()}`;
+  }
+  if (restoredMsg) {
+    saveStatus.textContent = restoredMsg;
   }
 }
 
@@ -131,6 +191,7 @@ tradeForm.addEventListener('submit', async (e) => {
       }),
     });
     fillForm(data.trade);
+    saveBackup(data.trade, data.savedAt);
     dirty = false;
     const via = data.savedVia ? ` via ${data.savedVia}` : '';
     saveStatus.textContent = `Saved at ${new Date(data.savedAt).toLocaleTimeString()}${via}`;
