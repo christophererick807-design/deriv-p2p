@@ -24,6 +24,10 @@ const ADMIN_DIR = path.join(__dirname, 'admin');
 const TRADE_CONFIG_FILE = path.join(PUBLIC_DIR, 'trade-config.json');
 const IS_VERCEL = Boolean(process.env.VERCEL || process.env.NOW_REGION);
 
+// Trade reads are cached briefly; TTL keeps multi-instance deployments consistent
+// without hammering GitHub/disk on every request.
+const TRADE_CACHE_TTL_MS = 60 * 1000;
+
 const DEFAULT_TRADE = {
   paymentMethod: 'Bank Transfer',
   tradeId: 'TR-88421',
@@ -34,6 +38,7 @@ const DEFAULT_TRADE = {
 // Survives within a warm serverless instance; cold starts fall back to file/GitHub
 let tradeCache = null;
 let tradeCacheSavedAt = null;
+let tradeCacheAt = 0;
 
 // Best-effort rate limit (per instance only on Vercel)
 const loginAttempts = new Map();
@@ -176,7 +181,9 @@ function recordSuccess(ip) {
 function readTradeFromDisk() {
   try {
     if (fs.existsSync(TRADE_CONFIG_FILE)) {
-      return sanitizeTrade(JSON.parse(fs.readFileSync(TRADE_CONFIG_FILE, 'utf8')));
+      const parsed = JSON.parse(fs.readFileSync(TRADE_CONFIG_FILE, 'utf8'));
+      const { savedAt, ...rest } = parsed;
+      return { trade: sanitizeTrade(rest), savedAt: savedAt || null };
     }
   } catch (err) {
     console.error('disk read trade-config:', err.message);
@@ -201,7 +208,9 @@ async function readTradeFromGitHub() {
     }
     const data = await res.json();
     const text = Buffer.from(data.content.replace(/\n/g, ''), 'base64').toString('utf8');
-    return { trade: sanitizeTrade(JSON.parse(text)), sha: data.sha };
+    const parsed = JSON.parse(text);
+    const { savedAt, ...rest } = parsed;
+    return { trade: sanitizeTrade(rest), savedAt: savedAt || null, sha: data.sha };
   } catch (err) {
     console.error('GitHub read error:', err.message);
     return null;
@@ -248,27 +257,57 @@ async function writeTradeToGitHub(trade) {
 
 function writeTradeToDisk(trade) {
   if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
-  fs.writeFileSync(TRADE_CONFIG_FILE, JSON.stringify(trade, null, 2) + '\n', 'utf8');
+  // Embed savedAt in the file so every reader (including other instances and
+  // fresh cold starts) can compare freshness across disk/GitHub/cache.
+  fs.writeFileSync(
+    TRADE_CONFIG_FILE,
+    JSON.stringify({ ...trade, savedAt: new Date().toISOString() }, null, 2) + '\n',
+    'utf8'
+  );
 }
 
 async function readTradeConfig() {
-  if (tradeCache) return { trade: tradeCache, savedAt: tradeCacheSavedAt };
+  if (tradeCache && Date.now() - tradeCacheAt < TRADE_CACHE_TTL_MS) {
+    return { trade: tradeCache, savedAt: tradeCacheSavedAt };
+  }
   const disk = readTradeFromDisk();
   if (disk) {
-    tradeCache = disk;
-    try {
-      tradeCacheSavedAt = fs.statSync(TRADE_CONFIG_FILE).mtime.toISOString();
-    } catch {
-      tradeCacheSavedAt = null;
-    }
+    tradeCache = disk.trade;
+    tradeCacheSavedAt = disk.savedAt || new Date().toISOString();
+    tradeCacheAt = Date.now();
     return { trade: tradeCache, savedAt: tradeCacheSavedAt };
   }
   const gh = await readTradeFromGitHub();
   if (gh && gh.trade) {
     tradeCache = gh.trade;
-    tradeCacheSavedAt = new Date().toISOString();
+    tradeCacheSavedAt = gh.savedAt || new Date().toISOString();
+    tradeCacheAt = Date.now();
     return { trade: tradeCache, savedAt: tradeCacheSavedAt };
   }
+  return { trade: { ...DEFAULT_TRADE }, savedAt: null };
+}
+
+/**
+ * Freshest source of truth, bypassing the per-instance cache. Used as the merge
+ * base when saving so a stale instance cannot overwrite newer GitHub data.
+ * Priority: GitHub (shared, survives redeploys) -> disk -> cache -> defaults.
+ */
+async function readTradeConfigFresh() {
+  const gh = GITHUB_TOKEN ? await readTradeFromGitHub() : null;
+  if (gh && gh.trade) {
+    tradeCache = gh.trade;
+    tradeCacheSavedAt = gh.savedAt || new Date().toISOString();
+    tradeCacheAt = Date.now();
+    return { trade: tradeCache, savedAt: tradeCacheSavedAt };
+  }
+  const disk = readTradeFromDisk();
+  if (disk) {
+    tradeCache = disk.trade;
+    tradeCacheSavedAt = disk.savedAt || new Date().toISOString();
+    tradeCacheAt = Date.now();
+    return { trade: tradeCache, savedAt: tradeCacheSavedAt };
+  }
+  if (tradeCache) return { trade: tradeCache, savedAt: tradeCacheSavedAt };
   return { trade: { ...DEFAULT_TRADE }, savedAt: null };
 }
 
@@ -276,39 +315,49 @@ async function writeTradeConfig(input) {
   const trade = sanitizeTrade(input);
   let savedVia = 'memory';
 
-  // Prefer local disk when writable (local / VPS)
+  // 1) Local disk when writable (local / VPS)
+  let diskOk = false;
   try {
     writeTradeToDisk(trade);
+    diskOk = true;
     savedVia = 'disk';
   } catch (diskErr) {
     console.warn('Disk write failed (expected on Vercel):', diskErr.message);
-    if (GITHUB_TOKEN) {
-      try {
-        await writeTradeToGitHub(trade);
-        savedVia = 'github';
-      } catch (ghErr) {
-        console.warn('GitHub write failed, using in-memory cache:', ghErr.message);
-        savedVia = 'memory';
-      }
-    } else {
-      // Still succeed so admin UI works; values live until this serverless instance cold-starts
-      console.warn('No GITHUB_TOKEN; trade save is in-memory only on this instance');
-      savedVia = 'memory';
-    }
   }
 
-  // If disk worked but we also have a token and are on Vercel-like host, still sync GitHub
-  if (savedVia === 'disk' && GITHUB_TOKEN && IS_VERCEL) {
+  // 2) GitHub is the durable shared source of truth. Sync it whenever a token is
+  //    configured, regardless of host, so a later redeploy can never wipe the change.
+  if (GITHUB_TOKEN) {
     try {
       await writeTradeToGitHub(trade);
-      savedVia = 'disk+github';
-    } catch (err) {
-      console.warn('Optional GitHub sync failed:', err.message);
+      savedVia = diskOk ? 'disk+github' : 'github';
+    } catch (ghErr) {
+      console.warn('GitHub write failed:', ghErr.message);
+      if (!diskOk) {
+        // No durable storage at all: refuse to pretend the save succeeded.
+        const err = new Error(
+          'Save is NOT permanent: filesystem is read-only and GitHub write failed. ' +
+            'Fix GITHUB_TOKEN permissions (contents:write) or storage, then save again.'
+        );
+        err.code = 'NO_PERSISTENCE';
+        throw err;
+      }
+      savedVia = 'disk';
     }
+  } else if (!diskOk) {
+    // No disk and no token: previously this silently saved to memory and lost
+    // the change on cold start/redeploy. Now it fails loudly instead.
+    const err = new Error(
+      'Save is NOT permanent: filesystem is read-only and GITHUB_TOKEN is not set. ' +
+        'Set GITHUB_TOKEN so saves persist to GitHub (contents:write permission).'
+    );
+    err.code = 'NO_PERSISTENCE';
+    throw err;
   }
 
   tradeCache = trade;
   tradeCacheSavedAt = new Date().toISOString();
+  tradeCacheAt = Date.now();
   return { trade, savedAt: tradeCacheSavedAt, savedVia };
 }
 
@@ -432,7 +481,9 @@ app.post('/admin/api/trade', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Provide paymentMethod, tradeId, amount, and/or status' });
   }
   try {
-    const current = (await readTradeConfig()).trade;
+    // Merge against the freshest source (GitHub first) so a stale instance
+    // cache can't silently overwrite a newer change made elsewhere.
+    const current = (await readTradeConfigFresh()).trade;
     const result = await writeTradeConfig({
       paymentMethod: body.paymentMethod != null ? body.paymentMethod : current.paymentMethod,
       tradeId: body.tradeId != null ? body.tradeId : current.tradeId,
@@ -443,7 +494,7 @@ app.post('/admin/api/trade', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Failed to save trade config:', err);
     const msg =
-      err.code === 'NO_GITHUB_TOKEN'
+      err.code === 'NO_GITHUB_TOKEN' || err.code === 'NO_PERSISTENCE'
         ? err.message
         : err.message || 'Failed to save trade settings';
     res.status(500).json({ error: msg });
